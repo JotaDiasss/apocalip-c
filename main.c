@@ -2,6 +2,7 @@
 // Controls: WASD to move, mouse to aim, left mouse button or automatic fire to shoot
 
 #include <SDL2/SDL.h>
+#include <SDL2/SDL_ttf.h>
 #include <math.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -42,6 +43,11 @@ static Uint32 last_shot_time = 0;
 static Uint32 last_enemy_spawn = 0;
 static int score = 0;
 static bool running = true;
+
+// Game timer / highscore
+#define GAME_DURATION_SECONDS 60.0f
+static Uint32 game_start_ticks = 0;
+static int highscore = 0;
 
 float randf(float a, float b) { return a + (b - a) * ((float)rand() / (float)RAND_MAX); }
 
@@ -93,6 +99,25 @@ int main(int argc, char** argv) {
         return 1;
     }
 
+    if (TTF_Init() != 0) {
+        fprintf(stderr, "TTF_Init error: %s\n", TTF_GetError());
+        // continue without text rendering
+    }
+
+    // attempt to locate a font
+    const char* font_paths[] = {
+        "./DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "C:/Windows/Fonts/arial.ttf",
+        NULL
+    };
+    TTF_Font* font = NULL;
+    for (int i = 0; font_paths[i] != NULL; ++i) {
+        if (!font_paths[i]) continue;
+        font = TTF_OpenFont(font_paths[i], 18);
+        if (font) break;
+    }
+
     SDL_Window* win = SDL_CreateWindow("apocalip C - Zombie Bullet Hell",
                                        SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
                                        WINDOW_W, WINDOW_H, SDL_WINDOW_SHOWN);
@@ -107,6 +132,19 @@ int main(int argc, char** argv) {
     player.speed = 280.0f;
     player.hp = 5;
 
+    // read highscore from file (optional)
+    FILE* hf = fopen("highscore.txt", "r");
+    if (hf) {
+        if (fscanf(hf, "%d", &highscore) != 1) highscore = 0;
+        fclose(hf);
+    } else {
+        highscore = 0;
+    }
+    printf("Highscore: %d\n", highscore);
+
+    // start game timer
+    game_start_ticks = SDL_GetTicks();
+
     for (int i = 0; i < MAX_BULLETS; ++i) bullets[i].alive = false;
     for (int i = 0; i < MAX_ENEMIES; ++i) enemies[i].alive = false;
 
@@ -114,6 +152,7 @@ int main(int argc, char** argv) {
     const Uint32 shoot_interval_ms = 120; // auto-fire interval
     const Uint32 enemy_spawn_interval = 900;
 
+    int last_printed_sec = -1;
     while (running) {
         Uint32 now = SDL_GetTicks();
         float dt = (now - last_time) / 1000.0f;
@@ -247,20 +286,94 @@ int main(int argc, char** argv) {
             SDL_RenderFillRect(ren, &h);
         }
 
-        // score - we won't render text (no font) but a simple rectangle bar indicates score roughly
-        int barW = (score > 500) ? 500 : score;
-        SDL_Rect sb = { 8, 30, barW / 2, 10 };
+        // Timer - replace the previous score bar with a time bar
+        float elapsed = (now - game_start_ticks) / 1000.0f;
+        float remaining = GAME_DURATION_SECONDS - elapsed;
+        if (remaining <= 0.0f) {
+            running = false; // time's up
+            remaining = 0.0f;
+        }
+        int fullW = 500; // full bar width in pixels
+        int tbw = (int)((remaining / GAME_DURATION_SECONDS) * fullW);
+        if (tbw < 0) tbw = 0;
+        // draw background bar
+        SDL_Rect tb_back = { 8, 30, fullW, 12 };
+        SDL_SetRenderDrawColor(ren, 60, 60, 80, 255);
+        SDL_RenderFillRect(ren, &tb_back);
+        // draw remaining time as blue bar
+        SDL_Rect tb = { 8, 30, tbw, 12 };
         SDL_SetRenderDrawColor(ren, 80, 160, 240, 255);
-        SDL_RenderFillRect(ren, &sb);
+        SDL_RenderFillRect(ren, &tb);
+
+        // render text for timer, score and highscore (if font available)
+        char buf[128];
+        if (font) {
+            int secs = (int)ceilf(remaining);
+            snprintf(buf, sizeof(buf), "Time: %ds", secs);
+            render_text(ren, font, buf, 8, 48);
+            snprintf(buf, sizeof(buf), "Score: %d", score);
+            render_text(ren, font, buf, 8, 68);
+            snprintf(buf, sizeof(buf), "Highscore: %d", highscore);
+            render_text(ren, font, buf, 8, 88);
+            if (secs != last_printed_sec) {
+                printf("[DEBUG] remaining seconds: %d\n", secs);
+                last_printed_sec = secs;
+            }
+        } else {
+            /* If font not available, print remaining every second to console for debug */
+            int secs = (int)ceilf(remaining);
+            if (secs != last_printed_sec) {
+                printf("[DEBUG] remaining seconds: %d\n", secs);
+                last_printed_sec = secs;
+            }
+        }
+
+        /* Additional visual debug: small red bar showing remaining proportion */
+        SDL_SetRenderDrawColor(ren, 200, 50, 50, 255);
+        SDL_Rect dbg = { 520, 30, (int)((float)tbw * 0.2f), 12 };
+        SDL_RenderFillRect(ren, &dbg);
 
         SDL_RenderPresent(ren);
     }
 
     // simple game over message to console
     printf("Game ended. Score: %d\n", score);
+    if (score > highscore) {
+        highscore = score;
+        FILE* hf2 = fopen("highscore.txt", "w");
+        if (hf2) {
+            fprintf(hf2, "%d\n", highscore);
+            fclose(hf2);
+            printf("New highscore! %d saved to highscore.txt\n", highscore);
+        } else {
+            printf("Could not save highscore to highscore.txt\n");
+        }
+    } else {
+        printf("Highscore remains: %d\n", highscore);
+    }
 
+    if (font) TTF_CloseFont(font);
+    TTF_Quit();
     SDL_DestroyRenderer(ren);
     SDL_DestroyWindow(win);
     SDL_Quit();
     return 0;
 }
+
+// forward declaration
+int render_text(SDL_Renderer* ren, TTF_Font* font, const char* text, int x, int y);
+
+int render_text(SDL_Renderer* ren, TTF_Font* font, const char* text, int x, int y) {
+    if (!font || !text) return -1;
+    SDL_Color col = { 230, 230, 230, 255 };
+    SDL_Surface* surf = TTF_RenderUTF8_Blended(font, text, col);
+    if (!surf) return -1;
+    SDL_Texture* tex = SDL_CreateTextureFromSurface(ren, surf);
+    SDL_Rect dst = { x, y, surf->w, surf->h };
+    SDL_FreeSurface(surf);
+    if (!tex) return -1;
+    SDL_RenderCopy(ren, tex, NULL, &dst);
+    SDL_DestroyTexture(tex);
+    return 0;
+}
+
