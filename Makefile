@@ -1,3 +1,20 @@
+CC = gcc
+CFLAGS = -O2 -Wall $(shell pkg-config --cflags sdl2 2>/dev/null)
+LIBS = $(shell pkg-config --libs sdl2 2>/dev/null)
+
+ifeq ($(LIBS),)
+LIBS = -lmingw32 -lSDL2main -lSDL2
+endif
+
+TARGET = apocalip
+
+all: $(TARGET)
+
+$(TARGET): main.c cli_lib.c cli_lib.h
+	$(CC) $(CFLAGS) -o $(TARGET) main.c cli_lib.c $(LIBS)
+
+clean:
+	rm -f $(TARGET)
 
 
 CC = gcc

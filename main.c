@@ -1,379 +1,280 @@
-// apocalip C - simple bullet-hell zombie survival in C using SDL2
-// Controls: WASD to move, mouse to aim, left mouse button or automatic fire to shoot
-
-#include <SDL2/SDL.h>
-#include <SDL2/SDL_ttf.h>
-#include <math.h>
-#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
+#include <math.h>
 #include <time.h>
 
-#define WINDOW_W 1024
-#define WINDOW_H 768
+#define SDL_MAIN_HANDLED
+#include <SDL2/SDL.h>
+#include "cli_lib.h"
 
-#define MAX_BULLETS 512 
-#define MAX_ENEMIES 256
+#define W 800
+#define H 600
 
-typedef struct {
+typedef struct Player {
     float x, y;
-    float vx, vy;
-    bool alive;
-    float life; // optional
-} Bullet;
-
-typedef struct {
-    float x, y;
-    float speed;
-    bool alive;
-    int hp;
-} Enemy;
-
-typedef struct {
-    float x, y;
-    float speed;
-    int hp;
+    int lives;
 } Player;
 
-static Bullet bullets[MAX_BULLETS];
-static Enemy enemies[MAX_ENEMIES];
-static Player player;
+typedef struct Bullet {
+    float x, y, vx, vy;
+    struct Bullet* next;
+} Bullet;
 
-static Uint32 last_shot_time = 0;
-static Uint32 last_enemy_spawn = 0;
-static int score = 0;
-static bool running = true;
+typedef struct Enemy {
+    float x, y;
+    float speed;
+    int hp;
+    int size;
+    struct Enemy* next;
+} Enemy;
 
-// Game timer / highscore
-#define GAME_DURATION_SECONDS 60.0f
-static Uint32 game_start_ticks = 0;
-static int highscore = 0;
+typedef struct Grid {
+    int rows, cols;
+    int* cells;
+} Grid;
 
-float randf(float a, float b) { return a + (b - a) * ((float)rand() / (float)RAND_MAX); }
+Player player;
+Bullet* bullets = NULL;
+Enemy* enemies = NULL;
+Grid spawn_grid;
 
-void spawn_bullet(float px, float py, float tx, float ty) {
-    // find free bullet
-    for (int i = 0; i < MAX_BULLETS; ++i) {
-        if (!bullets[i].alive) {
-            float dx = tx - px;
-            float dy = ty - py;
-            float len = sqrtf(dx*dx + dy*dy);
-            if (len < 0.001f) len = 1.0f;
-            dx /= len; dy /= len;
-            bullets[i].x = px;
-            bullets[i].y = py;
-            bullets[i].vx = dx * 600.0f; // speed pixels/s
-            bullets[i].vy = dy * 600.0f;
-            bullets[i].alive = true;
-            bullets[i].life = 2.0f;
-            break;
-        }
+int score = 0;
+float game_time = 0.0f;
+int running = 1;
+
+// auto-fire / burst control (ms)
+uint32_t last_shot_ms = 0;
+uint32_t burst_last_fire_ms = 0;
+int burst_shots = 0;
+int last_printed_second = -1;
+
+static float clampf(float v, float a, float b) { if (v < a) return a; if (v > b) return b; return v; }
+
+void add_bullet(float x, float y, float vx, float vy) {
+    Bullet* b = malloc(sizeof(Bullet));
+    if (!b) return;
+    b->x = x; b->y = y; b->vx = vx; b->vy = vy; b->next = bullets; bullets = b;
+}
+
+void free_bullets(void) {
+    Bullet* cur = bullets;
+    while (cur) { Bullet* nxt = cur->next; free(cur); cur = nxt; }
+    bullets = NULL;
+}
+
+void add_enemy(float x, float y, int size, float speed) {
+    Enemy* e = malloc(sizeof(Enemy));
+    if (!e) return;
+    e->x = x; e->y = y; e->size = size; e->speed = speed; e->hp = 3; e->next = enemies; enemies = e;
+}
+
+void free_enemies(void) {
+    Enemy* cur = enemies;
+    while (cur) { Enemy* nxt = cur->next; free(cur); cur = nxt; }
+    enemies = NULL;
+}
+
+void grid_init(Grid* g, int rows, int cols) {
+    g->rows = rows; g->cols = cols; g->cells = malloc(rows * cols * sizeof(int));
+    if (!g->cells) { g->rows = g->cols = 0; return; }
+    for (int i = 0; i < rows*cols; ++i) g->cells[i] = 1;
+}
+
+void grid_free(Grid* g) { if (g->cells) free(g->cells); g->cells = NULL; }
+
+void spawn_wave(int wave_strength) {
+    for (int i = 0; i < wave_strength; ++i) {
+        int side = rand() % 4;
+        float x,y;
+        if (side == 0) { x = -20; y = rand() % H; }
+        else if (side == 1) { x = W + 20; y = rand() % H; }
+        else if (side == 2) { x = rand() % W; y = -20; }
+        else { x = rand() % W; y = H + 20; }
+        int size = 1 + (int)(game_time / 20.0f);
+        if (size > 6) size = 6;
+        float speed = 40.0f + (rand()%60) + game_time*0.1f;
+        add_enemy(x,y,size,speed);
     }
 }
 
-void spawn_enemy() {
-    for (int i = 0; i < MAX_ENEMIES; ++i) {
-        if (!enemies[i].alive) {
-            float side = randf(0.0f, 4.0f);
-            float x, y;
-            if (side < 1.0f) { x = randf(-50, -10); y = randf(-50, WINDOW_H + 50); }
-            else if (side < 2.0f) { x = randf(WINDOW_W + 10, WINDOW_W + 50); y = randf(-50, WINDOW_H + 50); }
-            else if (side < 3.0f) { x = randf(-50, WINDOW_W + 50); y = randf(-50, -10); }
-            else { x = randf(-50, WINDOW_W + 50); y = randf(WINDOW_H + 10, WINDOW_H + 50); }
-            enemies[i].x = x;
-            enemies[i].y = y;
-            enemies[i].speed = randf(40.0f, 120.0f);
-            enemies[i].alive = true;
-            enemies[i].hp = 1 + (rand() % 3);
-            break;
-        }
-    }
+void save_score(const char* name, int final_score, float time_run) {
+    FILE* f = fopen("scores.txt","a");
+    if (!f) return;
+    fprintf(f, "%s %d %.2f\n", name, final_score, time_run);
+    fclose(f);
 }
 
-int main(int argc, char** argv) {
-    (void)argc; (void)argv;
+void print_podium(void) {
+    FILE* f = fopen("scores.txt","r");
+    if (!f) { printf("No scores yet.\n"); return; }
+    typedef struct S { char name[64]; int s; float t; } S;
+    S arr[256]; int n=0;
+    while (n < 256 && fscanf(f, "%63s %d %f", arr[n].name, &arr[n].s, &arr[n].t) == 3) n++;
+    fclose(f);
+    for (int i = 0; i < n; ++i) for (int j = i+1; j < n; ++j) if (arr[j].s > arr[i].s) { S tmp = arr[i]; arr[i]=arr[j]; arr[j]=tmp; }
+    printf("--- PODIUM ---\n");
+    for (int i = 0; i < 3 && i < n; ++i) printf("%d. %s  score=%d  time=%.1f\n", i+1, arr[i].name, arr[i].s, arr[i].t);
+}
+
+int circle_collide(float x1,float y1,float r1,float x2,float y2,float r2) {
+    float dx = x1-x2, dy = y1-y2;
+    return dx*dx + dy*dy <= (r1+r2)*(r1+r2);
+}
+
+int main(int argc, char* argv[]) {
     srand((unsigned)time(NULL));
+    printf("Welcome to apocalip-c (simple)!\n");
 
-    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_TIMER) != 0) {
-        fprintf(stderr, "SDL_Init error: %s\n", SDL_GetError());
-        return 1;
-    }
+    char name[64];
+    printf("Enter your name: "); fflush(stdout);
+    if (!fgets(name, sizeof(name), stdin)) strncpy(name, "Player", sizeof(name));
+    name[strcspn(name, "\n")] = '\0';
 
-    if (TTF_Init() != 0) {
-        fprintf(stderr, "TTF_Init error: %s\n", TTF_GetError());
-        // continue without text rendering
-    }
+    if (cli_init("apocalip-c", W, H) != 0) return 1;
 
-    // attempt to locate a font
-    const char* font_paths[] = {
-        "./DejaVuSans.ttf",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-        "C:/Windows/Fonts/arial.ttf",
-        NULL
-    };
-    TTF_Font* font = NULL;
-    for (int i = 0; font_paths[i] != NULL; ++i) {
-        if (!font_paths[i]) continue;
-        font = TTF_OpenFont(font_paths[i], 18);
-        if (font) break;
-    }
+    player.x = W/2; player.y = H/2; player.lives = 3;
+    score = 0; game_time = 0.0f; running = 1;
+    grid_init(&spawn_grid, 4, 4);
 
-    SDL_Window* win = SDL_CreateWindow("apocalip C - Zombie Bullet Hell",
-                                       SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
-                                       WINDOW_W, WINDOW_H, SDL_WINDOW_SHOWN);
-    if (!win) { fprintf(stderr, "SDL_CreateWindow error: %s\n", SDL_GetError()); SDL_Quit(); return 1; }
+    const float tick_s = 1.0f/60.0f;
+    float spawn_timer = 0.0f;
+    int wave = 0;
 
-    SDL_Renderer* ren = SDL_CreateRenderer(win, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
-    if (!ren) { fprintf(stderr, "SDL_CreateRenderer error: %s\n", SDL_GetError()); SDL_DestroyWindow(win); SDL_Quit(); return 1; }
-
-    // init game state
-    player.x = WINDOW_W * 0.5f;
-    player.y = WINDOW_H * 0.5f;
-    player.speed = 280.0f;
-    player.hp = 5;
-
-    // read highscore from file (optional)
-    FILE* hf = fopen("highscore.txt", "r");
-    if (hf) {
-        if (fscanf(hf, "%d", &highscore) != 1) highscore = 0;
-        fclose(hf);
-    } else {
-        highscore = 0;
-    }
-    printf("Highscore: %d\n", highscore);
-
-    // start game timer
-    game_start_ticks = SDL_GetTicks();
-
-    for (int i = 0; i < MAX_BULLETS; ++i) bullets[i].alive = false;
-    for (int i = 0; i < MAX_ENEMIES; ++i) enemies[i].alive = false;
-
-    Uint32 last_time = SDL_GetTicks();
-    const Uint32 shoot_interval_ms = 120; // auto-fire interval
-    const Uint32 enemy_spawn_interval = 900;
-
-    int last_printed_sec = -1;
     while (running) {
-        Uint32 now = SDL_GetTicks();
-        float dt = (now - last_time) / 1000.0f;
-        if (dt > 0.05f) dt = 0.05f; // clamp
-        last_time = now;
+        uint32_t t0 = cli_ticks();
+        CLI_Input in; cli_poll_input(&in);
+        if (in.quit) break;
 
-        // events
-        SDL_Event e;
-        const Uint8* keystate = SDL_GetKeyboardState(NULL);
-        int mx, my; Uint32 mouse_flags = SDL_GetMouseState(&mx, &my);
+        float mvx=0, mvy=0;
+        if (in.key_state[SDL_SCANCODE_W]) mvy -= 1.0f;
+        if (in.key_state[SDL_SCANCODE_S]) mvy += 1.0f;
+        if (in.key_state[SDL_SCANCODE_A]) mvx -= 1.0f;
+        if (in.key_state[SDL_SCANCODE_D]) mvx += 1.0f;
 
-        while (SDL_PollEvent(&e)) {
-            if (e.type == SDL_QUIT) running = false;
-            if (e.type == SDL_KEYDOWN && e.key.keysym.sym == SDLK_ESCAPE) running = false;
-        }
+        float mvlen = sqrtf(mvx*mvx + mvy*mvy);
+        if (mvlen > 0.0f) { mvx/=mvlen; mvy/=mvlen; }
 
-        // movement
-        float dx = 0, dy = 0;
-        if (keystate[SDL_SCANCODE_W]) dy -= 1.0f;
-        if (keystate[SDL_SCANCODE_S]) dy += 1.0f;
-        if (keystate[SDL_SCANCODE_A]) dx -= 1.0f;
-        if (keystate[SDL_SCANCODE_D]) dx += 1.0f;
-        if (dx != 0 || dy != 0) {
-            float len = sqrtf(dx*dx + dy*dy);
-            dx /= len; dy /= len;
-            player.x += dx * player.speed * dt;
-            player.y += dy * player.speed * dt;
-            if (player.x < 0) player.x = 0; if (player.x > WINDOW_W) player.x = WINDOW_W;
-            if (player.y < 0) player.y = 0; if (player.y > WINDOW_H) player.y = WINDOW_H;
-        }
+        player.x += mvx * 200.0f * tick_s;
+        player.y += mvy * 200.0f * tick_s;
+        player.x = clampf(player.x, 0, W);
+        player.y = clampf(player.y, 0, H);
 
-        // shooting (auto-fire while left button down or automatic)
-        bool mouse_down = (mouse_flags & SDL_BUTTON(SDL_BUTTON_LEFT)) != 0;
-        if (mouse_down || true) { // set to `true` to always auto-fire
-            if (now - last_shot_time >= shoot_interval_ms) {
-                spawn_bullet(player.x, player.y, (float)mx, (float)my);
-                last_shot_time = now;
+        // Auto-fire burst: every 1000ms start a burst of 4 shots spaced by ~80ms
+        const uint32_t BURST_INTERVAL_MS = 1000;
+        const uint32_t BURST_GAP_MS = 80;
+        const int BURST_SIZE = 4;
+        // start a new burst if enough time passed since last_shot_ms
+        if (burst_shots == 0) {
+            if ((t0 - last_shot_ms) >= BURST_INTERVAL_MS) {
+                // prepare to fire immediately
+                burst_shots = 0; /* will increment when firing */
+                burst_last_fire_ms = t0 - BURST_GAP_MS;
+                last_shot_ms = t0; // mark burst start
             }
         }
-
-        // spawn enemies
-        if (now - last_enemy_spawn >= enemy_spawn_interval) {
-            spawn_enemy();
-            last_enemy_spawn = now;
-        }
-
-        // update bullets
-        for (int i = 0; i < MAX_BULLETS; ++i) {
-            if (!bullets[i].alive) continue;
-            bullets[i].x += bullets[i].vx * dt;
-            bullets[i].y += bullets[i].vy * dt;
-            bullets[i].life -= dt;
-            if (bullets[i].life <= 0.0f) bullets[i].alive = false;
-            // out of bounds
-            if (bullets[i].x < -20 || bullets[i].x > WINDOW_W + 20 || bullets[i].y < -20 || bullets[i].y > WINDOW_H + 20) bullets[i].alive = false;
-        }
-
-        // update enemies and check collision with bullets and player
-        for (int i = 0; i < MAX_ENEMIES; ++i) {
-            if (!enemies[i].alive) continue;
-            float ex = enemies[i].x, ey = enemies[i].y;
-            float pdx = player.x - ex;
-            float pdy = player.y - ey;
-            float plen = sqrtf(pdx*pdx + pdy*pdy);
-            if (plen < 0.001f) plen = 1.0f;
-            pdx /= plen; pdy /= plen;
-            enemies[i].x += pdx * enemies[i].speed * dt;
-            enemies[i].y += pdy * enemies[i].speed * dt;
-
-            // collision with bullets
-            for (int b = 0; b < MAX_BULLETS; ++b) {
-                if (!bullets[b].alive) continue;
-                float bx = bullets[b].x, by = bullets[b].y;
-                float dxbe = bx - enemies[i].x;
-                float dybe = by - enemies[i].y;
-                float dist2 = dxbe*dxbe + dybe*dybe;
-                if (dist2 < (14.0f * 14.0f)) {
-                    bullets[b].alive = false;
-                    enemies[i].hp -= 1;
-                    if (enemies[i].hp <= 0) {
-                        enemies[i].alive = false;
-                        score += 10;
-                    }
-                    break;
-                }
-            }
-
-            // collision with player
-            float dxp = player.x - enemies[i].x;
-            float dyp = player.y - enemies[i].y;
-            if (dxp*dxp + dyp*dyp < (22.0f * 22.0f)) {
-                enemies[i].alive = false;
-                player.hp -= 1;
-                if (player.hp <= 0) {
-                    // game over
-                    running = false;
+        // fire shots in burst
+        if (burst_shots < BURST_SIZE) {
+            if ((t0 - burst_last_fire_ms) >= BURST_GAP_MS) {
+                float dx = in.mouse_x - player.x;
+                float dy = in.mouse_y - player.y;
+                float L = sqrtf(dx*dx + dy*dy); if (L < 1) L = 1;
+                add_bullet(player.x, player.y, dx/L*400.0f, dy/L*400.0f);
+                burst_shots += 1;
+                burst_last_fire_ms = t0;
+                if (burst_shots >= BURST_SIZE) {
+                    // finished burst; reset so next burst waits BURST_INTERVAL_MS
+                    burst_shots = 0;
+                    // last_shot_ms already set to burst start above
                 }
             }
         }
 
-        // rendering
-        SDL_SetRenderDrawColor(ren, 20, 20, 30, 255);
-        SDL_RenderClear(ren);
-
-        // draw player
-        SDL_Rect pr = { (int)(player.x - 10), (int)(player.y - 10), 20, 20 };
-        SDL_SetRenderDrawColor(ren, 180, 200, 80, 255);
-        SDL_RenderFillRect(ren, &pr);
-
-        // draw bullets
-        SDL_SetRenderDrawColor(ren, 255, 220, 80, 255);
-        for (int i = 0; i < MAX_BULLETS; ++i) {
-            if (!bullets[i].alive) continue;
-            SDL_Rect brect = { (int)(bullets[i].x - 3), (int)(bullets[i].y - 3), 6, 6 };
-            SDL_RenderFillRect(ren, &brect);
+        for (Bullet** pb = &bullets; *pb;) {
+            Bullet* b = *pb;
+            b->x += b->vx * tick_s; b->y += b->vy * tick_s;
+            if (b->x < -50 || b->x > W+50 || b->y < -50 || b->y > H+50) { *pb = b->next; free(b); }
+            else pb = &b->next;
         }
 
-        // draw enemies
-        SDL_SetRenderDrawColor(ren, 220, 60, 60, 255);
-        for (int i = 0; i < MAX_ENEMIES; ++i) {
-            if (!enemies[i].alive) continue;
-            SDL_Rect er = { (int)(enemies[i].x - 12), (int)(enemies[i].y - 12), 24, 24 };
-            SDL_RenderFillRect(ren, &er);
-        }
+        for (Enemy** pe = &enemies; *pe;) {
+            Enemy* e = *pe;
+            float dx = player.x - e->x;
+            float dy = player.y - e->y;
+            float L = sqrtf(dx*dx + dy*dy); if (L<1) L=1;
+            e->x += (dx/L) * e->speed * tick_s;
+            e->y += (dy/L) * e->speed * tick_s;
 
-        // HUD (simple)
-        // draw HP as rectangles
-        for (int i = 0; i < player.hp; ++i) {
-            SDL_Rect h = { 8 + i*18, 8, 14, 14 };
-            SDL_SetRenderDrawColor(ren, 200, 50, 50, 255);
-            SDL_RenderFillRect(ren, &h);
-        }
-
-        // Timer - replace the previous score bar with a time bar
-        float elapsed = (now - game_start_ticks) / 1000.0f;
-        float remaining = GAME_DURATION_SECONDS - elapsed;
-        if (remaining <= 0.0f) {
-            running = false; // time's up
-            remaining = 0.0f;
-        }
-        int fullW = 500; // full bar width in pixels
-        int tbw = (int)((remaining / GAME_DURATION_SECONDS) * fullW);
-        if (tbw < 0) tbw = 0;
-        // draw background bar
-        SDL_Rect tb_back = { 8, 30, fullW, 12 };
-        SDL_SetRenderDrawColor(ren, 60, 60, 80, 255);
-        SDL_RenderFillRect(ren, &tb_back);
-        // draw remaining time as blue bar
-        SDL_Rect tb = { 8, 30, tbw, 12 };
-        SDL_SetRenderDrawColor(ren, 80, 160, 240, 255);
-        SDL_RenderFillRect(ren, &tb);
-
-        // render text for timer, score and highscore (if font available)
-        char buf[128];
-        if (font) {
-            int secs = (int)ceilf(remaining);
-            snprintf(buf, sizeof(buf), "Time: %ds", secs);
-            render_text(ren, font, buf, 8, 48);
-            snprintf(buf, sizeof(buf), "Score: %d", score);
-            render_text(ren, font, buf, 8, 68);
-            snprintf(buf, sizeof(buf), "Highscore: %d", highscore);
-            render_text(ren, font, buf, 8, 88);
-            if (secs != last_printed_sec) {
-                printf("[DEBUG] remaining seconds: %d\n", secs);
-                last_printed_sec = secs;
+            int killed = 0;
+            for (Bullet** pb = &bullets; *pb;) {
+                Bullet* b = *pb;
+                if (circle_collide(b->x,b->y,3, e->x,e->y, e->size*6)) {
+                    e->hp -= 1;
+                    *pb = b->next;
+                    free(b);
+                    if (e->hp <= 0) { killed = 1; break; }
+                } else pb = &b->next;
             }
-        } else {
-            /* If font not available, print remaining every second to console for debug */
-            int secs = (int)ceilf(remaining);
-            if (secs != last_printed_sec) {
-                printf("[DEBUG] remaining seconds: %d\n", secs);
-                last_printed_sec = secs;
+            if (killed) { score += 10 * e->size; Enemy* tod = e; *pe = e->next; free(tod); continue; }
+
+            if (circle_collide(player.x,player.y,10, e->x,e->y, e->size*6)) {
+                player.lives -= 1;
+                Enemy* tod = e; *pe = e->next; free(tod);
+                if (player.lives <= 0) running = 0;
+                continue;
             }
+
+            pe = &e->next;
         }
 
-        /* Additional visual debug: small red bar showing remaining proportion */
-        SDL_SetRenderDrawColor(ren, 200, 50, 50, 255);
-        SDL_Rect dbg = { 520, 30, (int)((float)tbw * 0.2f), 12 };
-        SDL_RenderFillRect(ren, &dbg);
+        spawn_timer += tick_s;
+        if (spawn_timer >= 6.0f) {
+            wave += 1; spawn_timer = 0.0f;
+            int count = 3 + wave;
+            spawn_wave(count);
+        }
 
-        SDL_RenderPresent(ren);
+        cli_clear();
+        cli_draw_fillrect((int)player.x-8, (int)player.y-8, 16,16, 180,200,80);
+
+        for (Bullet* b = bullets; b; b = b->next)
+            cli_draw_fillrect((int)b->x-2,(int)b->y-2,4,4,255,220,80);
+
+        for (Enemy* e = enemies; e; e = e->next)
+            cli_draw_fillrect((int)e->x - e->size*6, (int)e->y - e->size*6, e->size*12, e->size*12, 220,60,60);
+
+        for (int i=0;i<player.lives;i++)
+            cli_draw_fillrect(8 + i*20, 8, 16, 16, 200,50,50);
+
+        int fullW = 200;
+        float total_run = 120.0f;
+        int tbw = (int)((1.0f - fminf(game_time/total_run,1.0f)) * fullW);
+        cli_draw_fillrect(8, 32, fullW, 10, 60,60,80);
+        cli_draw_fillrect(8, 32, tbw, 10, 80,160,240);
+
+        game_time += tick_s;
+        // print game time to console once per second (shows in absence of text rendering)
+        int cur_sec = (int)game_time;
+        if (cur_sec != last_printed_second) {
+            printf("[TIME] %.0f seconds\n", game_time);
+            last_printed_second = cur_sec;
+        }
+
+        cli_present();
+
+        uint32_t t1 = cli_ticks();
+        int took = (int)(t1 - t0);
+        if (took < 16) cli_delay(16 - took);
     }
 
-    // simple game over message to console
-    printf("Game ended. Score: %d\n", score);
-    if (score > highscore) {
-        highscore = score;
-        FILE* hf2 = fopen("highscore.txt", "w");
-        if (hf2) {
-            fprintf(hf2, "%d\n", highscore);
-            fclose(hf2);
-            printf("New highscore! %d saved to highscore.txt\n", highscore);
-        } else {
-            printf("Could not save highscore to highscore.txt\n");
-        }
-    } else {
-        printf("Highscore remains: %d\n", highscore);
-    }
+    // end run - save score and print podium
+    printf("Game Over. Score=%d time=%.1f lives=%d\n", score, game_time, player.lives);
+    save_score(name, score, game_time);
+    print_podium();
 
-    if (font) TTF_CloseFont(font);
-    TTF_Quit();
-    SDL_DestroyRenderer(ren);
-    SDL_DestroyWindow(win);
-    SDL_Quit();
+    free_bullets();
+    free_enemies();
+    grid_free(&spawn_grid);
+    cli_quit();
     return 0;
 }
-
-// forward declaration
-int render_text(SDL_Renderer* ren, TTF_Font* font, const char* text, int x, int y);
-
-int render_text(SDL_Renderer* ren, TTF_Font* font, const char* text, int x, int y) {
-    if (!font || !text) return -1;
-    SDL_Color col = { 230, 230, 230, 255 };
-    SDL_Surface* surf = TTF_RenderUTF8_Blended(font, text, col);
-    if (!surf) return -1;
-    SDL_Texture* tex = SDL_CreateTextureFromSurface(ren, surf);
-    SDL_Rect dst = { x, y, surf->w, surf->h };
-    SDL_FreeSurface(surf);
-    if (!tex) return -1;
-    SDL_RenderCopy(ren, tex, NULL, &dst);
-    SDL_DestroyTexture(tex);
-    return 0;
-}
-
