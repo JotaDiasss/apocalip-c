@@ -23,3 +23,5 @@ jao 290 8
 pipoca 157 6
 Player 204 7
 aaaaaaaaa 9 2
+Player 45 3
+alvaro 0 1

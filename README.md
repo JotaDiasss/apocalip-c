@@ -1,84 +1,76 @@
-# apocalip-c (simple)
-
-Projeto simples em C inspirado em Vampire Survivors. Implementação minimalista para exercício escolar.
-
-Características
-- Usa `cli_lib` (pequeno wrapper sobre SDL2 incluído neste repositório) para janela, desenho e entrada.
-- Conceitos demonstrados: structs, ponteiros, alocação dinâmica (malloc/free), listas encadeadas, matrizes (Grid), leitura/escrita de arquivo (`scores.txt`).
-- Cross-platform: Windows (MSYS2 MinGW) e Linux (pkg-config / libsdl2-dev).
-
-Como compilar (MSYS2 MinGW64 - Windows)
+apocalip.exe`
+apocalip.exe`
 # apocalip-c
 
-Jogo simples em C inspirado por Vampire Survivors. Usa SDL2 e um pequeno wrapper (`cli_lib`) que fornece desenho básico, input e texto via `SDL2_ttf` quando disponível.
+Jogo simples em C inspirado por Vampire Survivors.
+
+Resumo
+- Movimento com `WASD`, mira com o mouse e tiro com clique esquerdo.
+- Dash com `SPACE` (cooldown 3s) e invulnerabilidade temporária após acerto.
+- Ondas de inimigos (10 por onda), HP = número da onda, inimigos crescem por onda.
+- Pontuação salva em `scores.txt` e pódio exibido ao final.
 
 Requisitos
-- SDL2 (dev headers e libs)
-- SDL2_ttf (opcional, para texto na janela)
-- GCC (MinGW/MSYS2 no Windows ou GCC no Linux)
+- Compilador C (GCC/MinGW/WIN64). Use MSYS2 no Windows para facilitar.
+- SDL2 e SDL2_ttf instalados no sistema.
+- Uma fonte TTF no mesmo diretório (ex.: `DejaVuSans.ttf`). O jogo tenta usar `DejaVuSans.ttf` como fallback.
 
-Compilar (Windows PowerShell com MinGW/MSYS2) — exemplo rápido:
+Instalação (Windows MSYS2)
+- Abra o terminal MSYS2 MinGW 64-bit e execute:
+
+```powershell
+pacman -Syu ; pacman -Su
+pacman -S mingw-w64-x86_64-toolchain mingw-w64-x86_64-SDL2 mingw-w64-x86_64-SDL2_ttf
+```
+
+Instalação (Debian/Ubuntu)
+
+```bash
+sudo apt update
+sudo apt install build-essential libsdl2-dev libsdl2-ttf-dev
+```
+
+Compilar
+- Compilação direta (Windows PowerShell/MSYS2):
+
 ```powershell
 cd 'c:\Users\jotaa\OneDrive\Documentos\Vscode\apocalip-c'
 gcc main.c cli_lib.c -o apocalip.exe -lmingw32 -lSDL2main -lSDL2 -lSDL2_ttf -O2 -Wall -Wextra
 ```
 
-Compilar (Linux):
+- Compilar em Linux:
+
 ```bash
 gcc main.c cli_lib.c -o apocalip -lSDL2 -lSDL2_ttf -O2 -Wall -Wextra
 ```
 
 Executar
-- Windows: `.
-apocalip.exe`
-# apocalip-c
+- Windows (PowerShell / MSYS2):
 
-Jogo simples em C inspirado por Vampire Survivors. Usa SDL2 e um pequeno wrapper (`cli_lib`) que fornece desenho básico, input e texto via `SDL2_ttf` quando disponível.
-
-Requisitos
-- SDL2 (dev headers e libs)
-- SDL2_ttf (opcional, para texto na janela)
-- GCC (MinGW/MSYS2 no Windows ou GCC no Linux)
-
-Compilar (Windows PowerShell com MinGW/MSYS2) — exemplo rápido:
 ```powershell
-cd 'c:\Users\jotaa\OneDrive\Documentos\Vscode\apocalip-c'
-gcc main.c cli_lib.c -o apocalip.exe -lmingw32 -lSDL2main -lSDL2 -lSDL2_ttf -O2 -Wall -Wextra
+.\apocalip.exe
 ```
 
-Compilar (Linux):
+- Linux:
+
 ```bash
-gcc main.c cli_lib.c -o apocalip -lSDL2 -lSDL2_ttf -O2 -Wall -Wextra
+./apocalip
 ```
 
-Executar
-- Windows: `.
-apocalip.exe`
-- Linux: `./apocalip`
+Arquivo de scores
+- As pontuações são registradas em `scores.txt` no mesmo diretório do executável. Cada linha segue o formato:
+  `Nome Pontos Onda` (ex.: `Joao 1234 5`).
 
-Controles
-- `WASD`: mover
-- Mouse: mirar
-- Clique esquerdo: atirar
-- `Space`: dash (3s cooldown)
+Notas e solução de problemas
+- Se houver erro de link, verifique se as bibliotecas SDL2 e SDL2_ttf estão instaladas e que seu `PATH`/`LD_LIBRARY_PATH` inclui as dlls/so.
+- Se a fonte não for encontrada, coloque um `DejaVuSans.ttf` no diretório do jogo ou modifique o código para usar outra fonte instalada.
+- Para compilar no Windows sem MSYS2, adapte as flags de link conforme seu ambiente (Visual Studio exige projeto diferente).
 
-Persistência
-- Pontuações são salvas em `scores.txt` no formato: `<nome> <pontos> <onda>` (append).
+.gitignore
+- Há um `.gitignore` incluído para ignorar binários, arquivos objeto e configurações do editor.
 
-Arquivos principais
-- `main.c`: lógica do jogo (entrada, movimento, tiros, inimigos, ondas, HUD, pódio)
-- `cli_lib.c` / `cli_lib.h`: wrapper mínimo sobre SDL2 e SDL2_ttf para facilitar desenho e entrada
-
-Git
-- Adicionado `.gitignore` para binários, artefatos de build e arquivos de editor. Principais entradas:
-	- `apocalip.exe`, `apocalip`, `main` (binários)
-	- `*.o`, `*.obj`, `*.exe`, `*.dll`, `*.lib`, `*.a`
-	- `.vscode/`, `*.code-workspace`
-	- arquivos temporários: `*~`, `*.swp`, `*.bak`
-
-Observações
-- Os comentários do código foram removidos por solicitação do autor.
-- Nomes longos são truncados na tela do pódio para evitar problemas de formatação; `scores.txt` mantém o nome completo.
+Contribuições
+- Pull requests são bem-vindos para ajustes de jogabilidade, correções e portabilidade.
 
 Licença
-- Use por conta e risco; este é um projeto educativo.
+- Código fornecido sem licença explícita; adapte conforme necessário.
