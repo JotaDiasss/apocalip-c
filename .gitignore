@@ -1,0 +1,32 @@
+# Compiled binaries
+/apocalip.exe
+/apocalip
+/main
+
+# Object files and build artifacts
+*.o
+*.obj
+*.exe
+*.dll
+*.lib
+*.a
+
+# SDL/TTF font or asset caches (if any)
+*.cache
+
+# Editor/IDE
+.vscode/
+*.code-workspace
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Temporary files
+*~
+*.swp
+*.bak
+
+# Scores (kept in repo during development, but you may want to ignore)
+# Uncomment to avoid committing scores.txt
+# scores.txt

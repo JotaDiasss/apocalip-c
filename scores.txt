@@ -1,1 +1,25 @@
-Joao 630 45.35
+joao 1 1
+pedro 98 7
+paulo 98 6
+joao 61 5
+levi 10 2
+carlos 30 3
+joao pedro 73 4
+vine 80 4
+awzxcer 0 2
+lmiom 0 2
+pedro 210 7
+seila 156 6
+eu 0 1
+broder 60 4
+Player 8 1
+ddddd 10 1
+csbdtn 30 2
+vxdbnn 9 1
+zzzzzzzzzz 10 1
+xcvvvvvvvvvvv 26 2
+Player 99 5
+jao 290 8
+pipoca 157 6
+Player 204 7
+aaaaaaaaa 9 2

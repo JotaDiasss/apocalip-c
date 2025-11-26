@@ -3,278 +3,198 @@
 #include <string.h>
 #include <math.h>
 #include <time.h>
-
-#define SDL_MAIN_HANDLED
 #include <SDL2/SDL.h>
 #include "cli_lib.h"
 
-#define W 800
-#define H 600
+#define W 1280
+#define H 720
+#define PLAYER_SIZE 16
 
-typedef struct Player {
-    float x, y;
-    int lives;
-} Player;
+static const float player_speed = 150.0f;
+static const float ENEMY_SPEED = 160.0f;
+static const float DASH_MULT = 3.75f;
+static const int DASH_DURATION_MS = 300;
+static const int DASH_COOLDOWN_MS = 3000;
+static const int INVUL_MS = 1200;
 
-typedef struct Bullet {
-    float x, y, vx, vy;
-    struct Bullet* next;
-} Bullet;
+typedef struct Player { float x, y; int lives; } Player;
+typedef struct Bullet { float x, y, vx, vy; struct Bullet* next; } Bullet;
+typedef struct Enemy { float x, y; int size_px; float speed; int hp; struct Enemy* next; } Enemy;
+typedef struct ScoreRec { char name[64]; int s; int w; } ScoreRec;
 
-typedef struct Enemy {
-    float x, y;
-    float speed;
-    int hp;
-    int size;
-    struct Enemy* next;
-} Enemy;
+static Player player;
+static Bullet* bullets = NULL;
+static Enemy* enemies = NULL;
+static int score = 0;
+static int wave_num = 0;
 
-typedef struct Grid {
-    int rows, cols;
-    int* cells;
-} Grid;
+static int grid_rows = 10;
+static int grid_cols = 16;
+static int* spawn_grid = NULL;
 
-Player player;
-Bullet* bullets = NULL;
-Enemy* enemies = NULL;
-Grid spawn_grid;
+static void alloc_grid(void) {
+    if (spawn_grid) return;
+    spawn_grid = (int*)calloc((size_t)grid_rows * (size_t)grid_cols, sizeof(int));
+}
 
-int score = 0;
-float game_time = 0.0f;
-int running = 1;
+static void free_grid(void) {
+    if (spawn_grid) { free(spawn_grid); spawn_grid = NULL; }
+}
 
-// auto-fire / burst control (ms)
-uint32_t last_shot_ms = 0;
-uint32_t burst_last_fire_ms = 0;
-int burst_shots = 0;
-int last_printed_second = -1;
+static void inc_grid_at_xy(float x, float y) {
+    if (!spawn_grid) return;
+    int cx = (int)(x / ((float)W / (float)grid_cols));
+    int cy = (int)(y / ((float)H / (float)grid_rows));
+    if (cx < 0) cx = 0;
+    if (cx >= grid_cols) cx = grid_cols - 1;
+    if (cy < 0) cy = 0;
+    if (cy >= grid_rows) cy = grid_rows - 1;
+    spawn_grid[cy * grid_cols + cx]++;
+}
+
+static int last_mouse_down = 0;
+static int last_space_down = 0;
+static int dash_active = 0;
+static uint32_t dash_start_ms = 0;
+static uint32_t last_dash_ms = 0;
+static float dash_dir_x = 0.0f, dash_dir_y = -1.0f;
+static int invulnerable = 0;
+static uint32_t invul_start_ms = 0;
 
 static float clampf(float v, float a, float b) { if (v < a) return a; if (v > b) return b; return v; }
+static int circle_collide(float x1,float y1,float r1,float x2,float y2,float r2) { float dx = x1-x2, dy = y1-y2; float d2 = dx*dx + dy*dy; float r = r1 + r2; return d2 <= r*r; }
 
-void add_bullet(float x, float y, float vx, float vy) {
-    Bullet* b = malloc(sizeof(Bullet));
-    if (!b) return;
-    b->x = x; b->y = y; b->vx = vx; b->vy = vy; b->next = bullets; bullets = b;
-}
+static void add_bullet(float x, float y, float vx, float vy) { Bullet* b = malloc(sizeof(Bullet)); if (!b) return; b->x=x;b->y=y;b->vx=vx;b->vy=vy;b->next=bullets;bullets=b; }
+static void free_bullets(void) { while (bullets) { Bullet* n = bullets->next; free(bullets); bullets = n; } }
 
-void free_bullets(void) {
-    Bullet* cur = bullets;
-    while (cur) { Bullet* nxt = cur->next; free(cur); cur = nxt; }
-    bullets = NULL;
-}
+static void add_enemy(float x, float y, int size_px, float speed, int hp) { Enemy* e = malloc(sizeof(Enemy)); if (!e) return; e->x=x;e->y=y;e->size_px=size_px;e->speed=speed;e->hp=hp;e->next=enemies;enemies=e; }
+static void free_enemies(void) { while (enemies) { Enemy* n = enemies->next; free(enemies); enemies = n; } }
 
-void add_enemy(float x, float y, int size, float speed) {
-    Enemy* e = malloc(sizeof(Enemy));
-    if (!e) return;
-    e->x = x; e->y = y; e->size = size; e->speed = speed; e->hp = 3; e->next = enemies; enemies = e;
-}
-
-void free_enemies(void) {
-    Enemy* cur = enemies;
-    while (cur) { Enemy* nxt = cur->next; free(cur); cur = nxt; }
-    enemies = NULL;
-}
-
-void grid_init(Grid* g, int rows, int cols) {
-    g->rows = rows; g->cols = cols; g->cells = malloc(rows * cols * sizeof(int));
-    if (!g->cells) { g->rows = g->cols = 0; return; }
-    for (int i = 0; i < rows*cols; ++i) g->cells[i] = 1;
-}
-
-void grid_free(Grid* g) { if (g->cells) free(g->cells); g->cells = NULL; }
-
-void spawn_wave(int wave_strength) {
-    for (int i = 0; i < wave_strength; ++i) {
-        int side = rand() % 4;
-        float x,y;
-        if (side == 0) { x = -20; y = rand() % H; }
-        else if (side == 1) { x = W + 20; y = rand() % H; }
-        else if (side == 2) { x = rand() % W; y = -20; }
-        else { x = rand() % W; y = H + 20; }
-        int size = 1 + (int)(game_time / 20.0f);
-        if (size > 6) size = 6;
-        float speed = 40.0f + (rand()%60) + game_time*0.1f;
-        add_enemy(x,y,size,speed);
+static void spawn_wave(int wave) {
+    const int ENEMIES_PER_WAVE = 10;
+        for (int i=0;i<ENEMIES_PER_WAVE;i++) {
+        int side = rand()%4; float x,y;
+        if (side==0) { x=-30; y = rand()%H; }
+        else if (side==1) { x=W+30; y = rand()%H; }
+        else if (side==2) { x = rand()%W; y = -30; }
+        else { x = rand()%W; y = H+30; }
+        int size_px = (int)(PLAYER_SIZE * powf(1.2f, (float)(wave - 1)) + 0.5f);
+        float speed = ENEMY_SPEED + (float)((rand()%41)-20);
+        add_enemy(x,y,size_px,speed,wave);
+        inc_grid_at_xy(x < 0 ? 0 : (x>W?W:x), y < 0 ? 0 : (y>H?H:y));
     }
 }
 
-void save_score(const char* name, int final_score, float time_run) {
-    FILE* f = fopen("scores.txt","a");
-    if (!f) return;
-    fprintf(f, "%s %d %.2f\n", name, final_score, time_run);
+static void save_score(const char* name, int s, int w) { FILE* f = fopen("scores.txt","a"); if (!f) return; fprintf(f, "%s %d %d\n", name, s, w); fclose(f); }
+static int load_scores(ScoreRec* out, int max) {
+    int cnt=0; FILE* f = fopen("scores.txt","r"); if (!f) return 0;
+    char line[256]; while (cnt<max && fgets(line,sizeof(line),f)) { char n[64]; int s,w; if (sscanf(line, "%63s %d %d", n, &s, &w)==3) { strncpy(out[cnt].name,n,sizeof(out[cnt].name)); out[cnt].s=s; out[cnt].w=w; cnt++; } }
     fclose(f);
-}
-
-void print_podium(void) {
-    FILE* f = fopen("scores.txt","r");
-    if (!f) { printf("No scores yet.\n"); return; }
-    typedef struct S { char name[64]; int s; float t; } S;
-    S arr[256]; int n=0;
-    while (n < 256 && fscanf(f, "%63s %d %f", arr[n].name, &arr[n].s, &arr[n].t) == 3) n++;
-    fclose(f);
-    for (int i = 0; i < n; ++i) for (int j = i+1; j < n; ++j) if (arr[j].s > arr[i].s) { S tmp = arr[i]; arr[i]=arr[j]; arr[j]=tmp; }
-    printf("--- PODIUM ---\n");
-    for (int i = 0; i < 3 && i < n; ++i) printf("%d. %s  score=%d  time=%.1f\n", i+1, arr[i].name, arr[i].s, arr[i].t);
-}
-
-int circle_collide(float x1,float y1,float r1,float x2,float y2,float r2) {
-    float dx = x1-x2, dy = y1-y2;
-    return dx*dx + dy*dy <= (r1+r2)*(r1+r2);
+    for (int i=0;i<cnt;i++) for (int j=i+1;j<cnt;j++) if (out[j].s > out[i].s) { ScoreRec t = out[i]; out[i]=out[j]; out[j]=t; }
+    return cnt;
 }
 
 int main(int argc, char* argv[]) {
-    srand((unsigned)time(NULL));
-    printf("Welcome to apocalip-c (simple)!\n");
-
-    char name[64];
-    printf("Enter your name: "); fflush(stdout);
-    if (!fgets(name, sizeof(name), stdin)) strncpy(name, "Player", sizeof(name));
-    name[strcspn(name, "\n")] = '\0';
-
+    (void)argc;(void)argv; srand((unsigned)time(NULL));
     if (cli_init("apocalip-c", W, H) != 0) return 1;
+    int have_ttf = 0; const char* fonts[] = {"./DejaVuSans.ttf", "C:/Windows/Fonts/arial.ttf", NULL};
+    for (int i=0; fonts[i]; ++i) if (cli_init_ttf(fonts[i],18)==0) { have_ttf = 1; break; }
 
-    player.x = W/2; player.y = H/2; player.lives = 3;
-    score = 0; game_time = 0.0f; running = 1;
-    grid_init(&spawn_grid, 4, 4);
-
-    const float tick_s = 1.0f/60.0f;
-    float spawn_timer = 0.0f;
-    int wave = 0;
-
-    while (running) {
-        uint32_t t0 = cli_ticks();
-        CLI_Input in; cli_poll_input(&in);
-        if (in.quit) break;
-
-        float mvx=0, mvy=0;
-        if (in.key_state[SDL_SCANCODE_W]) mvy -= 1.0f;
-        if (in.key_state[SDL_SCANCODE_S]) mvy += 1.0f;
-        if (in.key_state[SDL_SCANCODE_A]) mvx -= 1.0f;
-        if (in.key_state[SDL_SCANCODE_D]) mvx += 1.0f;
-
-        float mvlen = sqrtf(mvx*mvx + mvy*mvy);
-        if (mvlen > 0.0f) { mvx/=mvlen; mvy/=mvlen; }
-
-        player.x += mvx * 200.0f * tick_s;
-        player.y += mvy * 200.0f * tick_s;
-        player.x = clampf(player.x, 0, W);
-        player.y = clampf(player.y, 0, H);
-
-        // Auto-fire burst: every 1000ms start a burst of 4 shots spaced by ~80ms
-        const uint32_t BURST_INTERVAL_MS = 1000;
-        const uint32_t BURST_GAP_MS = 80;
-        const int BURST_SIZE = 4;
-        // start a new burst if enough time passed since last_shot_ms
-        if (burst_shots == 0) {
-            if ((t0 - last_shot_ms) >= BURST_INTERVAL_MS) {
-                // prepare to fire immediately
-                burst_shots = 0; /* will increment when firing */
-                burst_last_fire_ms = t0 - BURST_GAP_MS;
-                last_shot_ms = t0; // mark burst start
+    int quit_program = 0;
+    while (!quit_program) {
+        char name[64] = "Player";
+        if (have_ttf) {
+            cli_start_text_input(); cli_clear_text_input(); int entered = 0;
+            while (!entered && !quit_program) {
+                uint32_t t0 = cli_ticks(); CLI_Input input; cli_poll_input(&input);
+                if (input.quit) { quit_program = 1; break; }
+                cli_clear(); cli_render_text("Digite seu nome:", W/2-120, H/2-48, 230,230,230);
+                cli_render_text(input.text_len?input.text:"(digite seu nome)", W/2-120, H/2-16, 200,255,200);
+                int bx = W/2-64, by = H/2+24, bw=128, bh=40; cli_draw_fillrect(bx,by,bw,bh,80,200,120); cli_render_text("Jogar", bx+36, by+10, 10,10,10);
+                if ((input.mouse_buttons & SDL_BUTTON(SDL_BUTTON_LEFT))!=0) { int mx=input.mouse_x,my=input.mouse_y; if (mx>=bx && mx<=bx+bw && my>=by && my<=by+bh) { if (input.text_len>0) strncpy(name,input.text,sizeof(name)); name[sizeof(name)-1]='\0'; entered = 1; break; } }
+                if (input.enter) { if (input.text_len>0) strncpy(name,input.text,sizeof(name)); name[sizeof(name)-1]='\0'; entered = 1; break; }
+                cli_present(); uint32_t t1 = cli_ticks(); int took = (int)(t1-t0); if (took<16) cli_delay(16-took);
             }
+            cli_stop_text_input(); if (quit_program) break;
+        } else {
+            printf("Digite seu nome: "); fflush(stdout); if (fgets(name,sizeof(name),stdin)) name[strcspn(name, "\n")]='\0';
         }
-        // fire shots in burst
-        if (burst_shots < BURST_SIZE) {
-            if ((t0 - burst_last_fire_ms) >= BURST_GAP_MS) {
-                float dx = in.mouse_x - player.x;
-                float dy = in.mouse_y - player.y;
-                float L = sqrtf(dx*dx + dy*dy); if (L < 1) L = 1;
-                add_bullet(player.x, player.y, dx/L*400.0f, dy/L*400.0f);
-                burst_shots += 1;
-                burst_last_fire_ms = t0;
-                if (burst_shots >= BURST_SIZE) {
-                    // finished burst; reset so next burst waits BURST_INTERVAL_MS
-                    burst_shots = 0;
-                    // last_shot_ms already set to burst start above
+
+        free_bullets(); free_enemies(); free_grid(); alloc_grid(); player.x=W/2.0f; player.y=H/2.0f; player.lives=3; score=0; wave_num=1; spawn_wave(wave_num);
+        int running = 1; uint32_t last_enemy_dead_ms = 0; int wave_in_progress = 1;
+
+        while (running) {
+            uint32_t t0 = cli_ticks(); CLI_Input input; cli_poll_input(&input); if (input.quit) { running=0; quit_program=1; break; }
+            if (dash_active && (t0 - dash_start_ms >= DASH_DURATION_MS)) dash_active = 0;
+            float mvx=0,mvy=0; if (input.key_state[SDL_SCANCODE_W]) mvy -= 1; if (input.key_state[SDL_SCANCODE_S]) mvy += 1; if (input.key_state[SDL_SCANCODE_A]) mvx -= 1; if (input.key_state[SDL_SCANCODE_D]) mvx += 1;
+            float input_mvx = mvx, input_mvy = mvy; float mvlen = sqrtf(mvx*mvx + mvy*mvy); if (mvlen>0) { mvx/=mvlen; mvy/=mvlen; } else { mvx=0; mvy=0; }
+            float move_speed = player_speed; if (dash_active) { move_speed = player_speed * DASH_MULT; mvx = dash_dir_x; mvy = dash_dir_y; }
+            player.x += mvx * move_speed * (1.0f/60.0f); player.y += mvy * move_speed * (1.0f/60.0f);
+            player.x = clampf(player.x,0,(float)W); player.y = clampf(player.y,0,(float)H);
+            int space_down = (input.key_state[SDL_SCANCODE_SPACE] != 0);
+            if (space_down && !last_space_down && !dash_active && (t0 - last_dash_ms >= DASH_COOLDOWN_MS)) { dash_active = 1; dash_start_ms = t0; last_dash_ms = t0; if (input_mvx==0 && input_mvy==0) { dash_dir_x=0; dash_dir_y=-1; } else { float il=sqrtf(input_mvx*input_mvx+input_mvy*input_mvy); dash_dir_x=input_mvx/(il>0?il:1); dash_dir_y=input_mvy/(il>0?il:1); } }
+            last_space_down = space_down;
+            int mouse_down = (input.mouse_buttons & SDL_BUTTON(SDL_BUTTON_LEFT))!=0; if (mouse_down && !last_mouse_down) { float dx = (float)input.mouse_x - player.x; float dy = (float)input.mouse_y - player.y; float L = sqrtf(dx*dx+dy*dy); if (L<1) L=1; add_bullet(player.x,player.y,dx/L*400.0f,dy/L*400.0f); } last_mouse_down = mouse_down;
+
+            for (Bullet** pb=&bullets; *pb;) { Bullet* b = *pb; b->x += b->vx*(1.0f/60.0f); b->y += b->vy*(1.0f/60.0f); if (b->x < -50 || b->x > W+50 || b->y < -50 || b->y > H+50) { *pb = b->next; free(b); } else pb = &b->next; }
+
+            for (Enemy** pe=&enemies; *pe;) { Enemy* e = *pe; float dx = player.x - e->x; float dy = player.y - e->y; float L = sqrtf(dx*dx+dy*dy); if (L<1) L=1; e->x += (dx/L)*e->speed*(1.0f/60.0f); e->y += (dy/L)*e->speed*(1.0f/60.0f); int killed=0; for (Bullet** pb=&bullets; *pb;) { Bullet* b=*pb; if (circle_collide(b->x,b->y,3.0f,e->x,e->y,(float)e->size_px*0.5f)) { e->hp -=1; *pb = b->next; free(b); if (e->hp<=0) { killed=1; break; } } else pb = &b->next; } if (killed) { score += wave_num; Enemy* tod = e; *pe = e->next; free(tod); continue; } if (circle_collide(player.x,player.y,(float)PLAYER_SIZE*0.5f,e->x,e->y,(float)e->size_px*0.5f)) { if (!invulnerable) { player.lives -= 1; invulnerable = 1; invul_start_ms = t0; } Enemy* tod = e; *pe = e->next; free(tod); if (player.lives <= 0) running = 0; continue; } pe = &e->next; }
+
+            if (enemies == NULL) { if (wave_in_progress) { last_enemy_dead_ms = cli_ticks(); wave_in_progress = 0; } else { if (last_enemy_dead_ms != 0 && (cli_ticks() - last_enemy_dead_ms >= 3000)) { wave_num++; spawn_wave(wave_num); wave_in_progress = 1; last_enemy_dead_ms = 0; } } }
+
+            int draw_player = 1; if (invulnerable) { uint32_t inv_elapsed = t0 - invul_start_ms; if (inv_elapsed >= (uint32_t)INVUL_MS) invulnerable = 0; else { uint32_t bi = INVUL_MS/6; if (((inv_elapsed/bi)&1)==1) draw_player = 0; } }
+            cli_clear(); if (draw_player) cli_draw_fillrect((int)player.x-PLAYER_SIZE/2,(int)player.y-PLAYER_SIZE/2,PLAYER_SIZE,PLAYER_SIZE,180,200,80);
+            for (Bullet* b=bullets;b;b=b->next) cli_draw_fillrect((int)b->x-2,(int)b->y-2,4,4,255,220,80);
+            for (Enemy* e=enemies;e;e=e->next) cli_draw_fillrect((int)e->x-e->size_px/2,(int)e->y-e->size_px/2,e->size_px,e->size_px,220,60,60);
+            for (int i=0;i<player.lives;i++) cli_draw_fillrect(8+i*20,8,16,16,200,50,50);
+            if (have_ttf) { char buf[128]; snprintf(buf,sizeof(buf),"Pontos: %d",score); cli_render_text(buf,W-220,8,230,230,230); char wb[64]; snprintf(wb,sizeof(wb),"Onda: %d",wave_num); cli_render_text(wb,W-220,32,200,200,255); }
+            if (spawn_grid) {
+                int gx = 8;
+                int gy = 40;
+                for (int ry=0; ry<grid_rows; ++ry) {
+                    for (int cx=0; cx<grid_cols; ++cx) {
+                        int v = spawn_grid[ry*grid_cols + cx];
+                        if (v <= 0) continue;
+                        int intensity = v > 5 ? 255 : 50 + v*40;
+                        int sx = gx + cx*6;
+                        int sy = gy + ry*6;
+                        cli_draw_fillrect(sx, sy, 5, 5, intensity, 40, 40);
+                    }
                 }
             }
+            cli_present(); uint32_t t1 = cli_ticks(); int took = (int)(t1-t0); if (took<16) cli_delay(16-took);
         }
 
-        for (Bullet** pb = &bullets; *pb;) {
-            Bullet* b = *pb;
-            b->x += b->vx * tick_s; b->y += b->vy * tick_s;
-            if (b->x < -50 || b->x > W+50 || b->y < -50 || b->y > H+50) { *pb = b->next; free(b); }
-            else pb = &b->next;
-        }
+        save_score(name, score, wave_num);
+        ScoreRec scores[256]; int scnt = load_scores(scores,256);
+        int placement = -1; for (int i=0;i<scnt;i++) if (strcmp(scores[i].name,name)==0 && scores[i].s==score) { placement = i+1; break; }
 
-        for (Enemy** pe = &enemies; *pe;) {
-            Enemy* e = *pe;
-            float dx = player.x - e->x;
-            float dy = player.y - e->y;
-            float L = sqrtf(dx*dx + dy*dy); if (L<1) L=1;
-            e->x += (dx/L) * e->speed * tick_s;
-            e->y += (dy/L) * e->speed * tick_s;
-
-            int killed = 0;
-            for (Bullet** pb = &bullets; *pb;) {
-                Bullet* b = *pb;
-                if (circle_collide(b->x,b->y,3, e->x,e->y, e->size*6)) {
-                    e->hp -= 1;
-                    *pb = b->next;
-                    free(b);
-                    if (e->hp <= 0) { killed = 1; break; }
-                } else pb = &b->next;
+        int choice_restart = 0, choice_exit = 0;
+        while (!choice_restart && !choice_exit) {
+            CLI_Input in2; cli_poll_input(&in2); if (in2.quit) { choice_exit = 1; break; }
+            cli_clear(); int podium_x = W/2-200, podium_y = H/2-140; cli_draw_fillrect(podium_x-8,podium_y-8,416,220,40,40,50);
+            if (have_ttf) {
+                cli_render_text("--- PÓDIO ---", podium_x+110, podium_y-4, 255,220,180);
+                for (int i=0;i<3;i++) {
+                    if (i<scnt) { char buf[128]; snprintf(buf,sizeof(buf),"%d. %.48s  %d pts (onda %d)", i+1, scores[i].name, scores[i].s, scores[i].w); cli_render_text(buf,podium_x+16,podium_y+24+i*36,220,220,220); }
+                    else { char buf[128]; snprintf(buf,sizeof(buf),"%d. ---", i+1); cli_render_text(buf,podium_x+16,podium_y+24+i*36,120,120,120); }
+                }
+                char cur[160]; if (placement>0) snprintf(cur,sizeof(cur),"Você: %.48s  %d pts  posição: %d",name,score,placement); else snprintf(cur,sizeof(cur),"Você: %.48s  %d pts  posição: -",name,score);
+                cli_render_text(cur,podium_x+16,podium_y+24+3*36+8,200,255,200);
+                int bx = W/2-180, by = podium_y+24+3*36+56, bw = 160, bh = 36; int bx2 = W/2+20, by2 = by, bw2=120, bh2=36;
+                cli_draw_fillrect(bx,by,bw,bh,80,200,120); cli_render_text("Jogar Novamente", bx+8, by+8, 10,10,10);
+                cli_draw_fillrect(bx2,by2,bw2,bh2,200,80,80); cli_render_text("Sair", bx2+28, by2+8, 10,10,10);
+                if ((in2.mouse_buttons & SDL_BUTTON(SDL_BUTTON_LEFT))!=0) { int mx=in2.mouse_x,my=in2.mouse_y; if (mx>=bx && mx<=bx+bw && my>=by && my<=by+bh) { choice_restart=1; break; } if (mx>=bx2 && mx<=bx2+bw2 && my>=by2 && my<=by2+bh2) { choice_exit=1; break; } }
+                if (in2.enter) { choice_restart = 1; break; }
+            } else {
+                cli_render_text("Fim de Jogo",20,H/2-20,255,200,200);
+                printf("Fim de Jogo - %s\n",name); printf("Pontos: %d   Onda: %d\n",score,wave_num);
+                printf("Pódio:\n"); for (int i=0;i<3 && i<scnt;i++) printf("%d. %s %d\n", i+1, scores[i].name, scores[i].s);
+                printf("Sua colocação: %d\n", placement); printf("Pressione Enter para reiniciar ou feche para sair\n"); if (in2.enter) { choice_restart = 1; break; }
             }
-            if (killed) { score += 10 * e->size; Enemy* tod = e; *pe = e->next; free(tod); continue; }
-
-            if (circle_collide(player.x,player.y,10, e->x,e->y, e->size*6)) {
-                player.lives -= 1;
-                Enemy* tod = e; *pe = e->next; free(tod);
-                if (player.lives <= 0) running = 0;
-                continue;
-            }
-
-            pe = &e->next;
+            cli_present(); cli_delay(100);
         }
-
-        spawn_timer += tick_s;
-        if (spawn_timer >= 6.0f) {
-            wave += 1; spawn_timer = 0.0f;
-            int count = 3 + wave;
-            spawn_wave(count);
-        }
-
-        cli_clear();
-        cli_draw_fillrect((int)player.x-8, (int)player.y-8, 16,16, 180,200,80);
-
-        for (Bullet* b = bullets; b; b = b->next)
-            cli_draw_fillrect((int)b->x-2,(int)b->y-2,4,4,255,220,80);
-
-        for (Enemy* e = enemies; e; e = e->next)
-            cli_draw_fillrect((int)e->x - e->size*6, (int)e->y - e->size*6, e->size*12, e->size*12, 220,60,60);
-
-        for (int i=0;i<player.lives;i++)
-            cli_draw_fillrect(8 + i*20, 8, 16, 16, 200,50,50);
-
-        int fullW = 200;
-        float total_run = 120.0f;
-        int tbw = (int)((1.0f - fminf(game_time/total_run,1.0f)) * fullW);
-        cli_draw_fillrect(8, 32, fullW, 10, 60,60,80);
-        cli_draw_fillrect(8, 32, tbw, 10, 80,160,240);
-
-        game_time += tick_s;
-        // print game time to console once per second (shows in absence of text rendering)
-        int cur_sec = (int)game_time;
-        if (cur_sec != last_printed_second) {
-            printf("[TIME] %.0f seconds\n", game_time);
-            last_printed_second = cur_sec;
-        }
-
-        cli_present();
-
-        uint32_t t1 = cli_ticks();
-        int took = (int)(t1 - t0);
-        if (took < 16) cli_delay(16 - took);
+        free_bullets(); free_enemies(); free_grid(); if (choice_exit) { quit_program = 1; break; }
     }
-
-    // end run - save score and print podium
-    printf("Game Over. Score=%d time=%.1f lives=%d\n", score, game_time, player.lives);
-    save_score(name, score, game_time);
-    print_podium();
-
-    free_bullets();
-    free_enemies();
-    grid_free(&spawn_grid);
-    cli_quit();
-    return 0;
+    cli_quit(); return 0;
 }
