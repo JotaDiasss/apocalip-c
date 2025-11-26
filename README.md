@@ -30,6 +30,11 @@ sudo apt update
 sudo apt install build-essential libsdl2-dev libsdl2-ttf-dev
 ```
 
+Gameplay
+- https://github.com/user-attachments/assets/a91e1bbb-3aad-42e9-a3f4-13661ba143c0
+
+
+
 Compilar
 - Compilação direta (Windows PowerShell/MSYS2):
 
