@@ -9,6 +9,7 @@ Resumo
 - Dash com `SPACE` (cooldown 3s) e invulnerabilidade temporária após acerto.
 - Ondas de inimigos (10 por onda), HP = número da onda, inimigos crescem por onda.
 - Pontuação salva em `scores.txt` e pódio exibido ao final.
+- Conta função de salvar o nome do jogador, salvando assim sua pontuação e jogando em uma tabela de acordo com sua pontuação dentro de cada "run".
 
 Requisitos
 - Compilador C (GCC/MinGW/WIN64). Use MSYS2 no Windows para facilitar.
